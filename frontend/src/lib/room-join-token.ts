@@ -53,7 +53,7 @@ function writeMap(map: RoomJoinTokenMap): void {
   try {
     localStorage.setItem(ROOM_JOIN_TOKEN_KEY, JSON.stringify(map))
   } catch {
-    // ignore storage write failures (private mode/quota)
+    // 초대 토큰 캐시는 다시 발급받을 수 있으니 저장 실패만으로 화면을 막지 않는다.
   }
 }
 

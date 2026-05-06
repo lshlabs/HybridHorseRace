@@ -103,6 +103,7 @@ function buildRaceStatePayloadCacheKey(params: {
   payloadDocId: string
   setData: GetRaceStateSetDocData | undefined
 }): string {
+  // 같은 세트라도 raceState가 갱신되면 이전 payload를 쓰면 안 돼서 갱신 시각/개수를 키에 섞는다.
   const updatedAtMillis = params.setData?.raceState?.updatedAt?.toMillis?.() ?? 'na'
   const keyframeCount = params.setData?.raceState?.keyframeCount ?? 'na'
   const eventCount = params.setData?.raceState?.eventCount ?? 'na'
@@ -123,6 +124,7 @@ function readCachedRaceStatePayload(cacheKey: string, nowMillis: number): Cached
 
 function writeCachedRaceStatePayload(cacheKey: string, payload: Omit<CachedRaceStatePayload, 'cachedAtMs'>) {
   if (raceStatePayloadCache.size >= RACE_STATE_PAYLOAD_CACHE_MAX_ENTRIES) {
+    // 함수 인스턴스 메모리 캐시라 단순 FIFO로 충분하고, 너무 커져서 오래 붙잡지 않게 한다.
     const oldestKey = raceStatePayloadCache.keys().next().value
     if (oldestKey) {
       raceStatePayloadCache.delete(oldestKey)
@@ -153,7 +155,7 @@ type SetResultSummary = {
 }
 
 function shouldSampleRead(action: 'getRaceState' | 'getSetResult'): boolean {
-  // High-frequency callable이므로 고정 비율 샘플링으로 로그 비용을 제어한다.
+  // 자주 호출되는 callable이라 모든 요청을 로그로 남기지 않고 고정 비율로만 찍는다.
   if (action === 'getRaceState') {
     raceStateReadCount += 1
     return raceStateReadCount % READ_PERF_LOG_SAMPLE_MOD === 0
@@ -400,6 +402,7 @@ export function createRaceReadCallables(deps: RaceReadDeps) {
         const payloadDocId = setData?.raceState?.payloadDocId ?? DEFAULT_RACE_STATE_PAYLOAD_DOC_ID
 
         if (hasInlinePayload) {
+          // 예전 inline 문서도 아직 읽을 수 있어야 배포 직후 방이 끊기지 않는다.
           const result = deps.buildGetRaceStateResponse({
             setIndex,
             setData,

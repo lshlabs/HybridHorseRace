@@ -307,7 +307,7 @@ const ChartLegendContent = React.forwardRef<
 })
 ChartLegendContent.displayName = 'ChartLegend'
 
-// Helper to extract item config from a payload.
+// Recharts payload는 중첩 위치가 달라질 때가 있어 label 키를 양쪽에서 찾아본다.
 function getPayloadConfigFromPayload(config: ChartConfig, payload: unknown, key: string) {
   if (typeof payload !== 'object' || payload === null) {
     return undefined

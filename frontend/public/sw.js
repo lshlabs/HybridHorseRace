@@ -1,4 +1,4 @@
-// Service Worker for PWA
+// PWA에서 새로고침/오프라인 진입 시 최소 화면을 보여주기 위한 서비스 워커.
 const CACHE_NAME = 'hybrid-horse-race-v2'
 const APP_SHELL_PATHS = ['/', '/index.html']
 
@@ -31,7 +31,7 @@ self.addEventListener('fetch', (event) => {
   const requestUrl = new URL(request.url)
   const isSameOrigin = requestUrl.origin === self.location.origin
 
-  // Let cross-origin requests (e.g. Firebase Functions) bypass the SW cache.
+  // Firebase Functions 같은 외부 요청은 캐시하면 실시간 상태가 낡아질 수 있어 그대로 통과시킨다.
   if (!isSameOrigin || request.method !== 'GET') {
     return
   }

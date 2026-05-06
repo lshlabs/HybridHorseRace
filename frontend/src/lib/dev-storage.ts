@@ -11,7 +11,7 @@ function removeStorageKey(key: string): void {
   try {
     localStorage.removeItem(key)
   } catch {
-    // ignore storage remove failures (private mode/quota)
+    // 개발용 캐시 삭제는 실패해도 실제 게임 데이터에는 영향이 없다.
   }
 }
 

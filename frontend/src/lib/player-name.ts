@@ -26,7 +26,7 @@ function writeRecord<T>(key: string, value: Record<string, T>): void {
   try {
     localStorage.setItem(key, JSON.stringify(value))
   } catch {
-    // ignore storage write failures (private mode/quota)
+    // 닉네임 캐시는 편의 기능이라 저장 실패로 화면 흐름을 막지 않는다.
   }
 }
 

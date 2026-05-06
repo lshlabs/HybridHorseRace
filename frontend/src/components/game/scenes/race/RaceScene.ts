@@ -537,7 +537,7 @@ export default class RaceScene extends Phaser.Scene {
       messageKey: 'game.startingRace',
       durationMs: null,
       onComplete: () => {
-        // manual close only
+        // 서버 시작 신호가 올 때까지 직접 닫지 않는다.
       },
     })
 
@@ -983,7 +983,7 @@ export default class RaceScene extends Phaser.Scene {
       messageKey: 'game.waitingAfterAugment',
       durationMs: null,
       onComplete: () => {
-        // manual close only
+        // 다음 레이스 상태가 확인될 때까지 직접 닫지 않는다.
       },
     })
 
@@ -2327,7 +2327,7 @@ export default class RaceScene extends Phaser.Scene {
       messageKey: 'game.waitingAfterResult',
       durationMs: null,
       onComplete: () => {
-        // manual close only
+        // 다음 세트 전환이 확인될 때까지 직접 닫지 않는다.
       },
     })
 

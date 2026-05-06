@@ -231,6 +231,7 @@ export function createRoomLifecycleCallables(deps: RoomLifecycleDeps) {
     const participantAuthRef = roomRef.collection('participantAuth').doc(playerId)
     const gracePeriodMs = Math.max(5_000, deps.leaveGracePeriodMs ?? DEFAULT_LEAVE_GRACE_PERIOD_MS)
 
+    // 탭 닫기/앱 전환은 진짜 퇴장인지 애매해서, 바로 삭제하지 않고 짧게 복귀 시간을 준다.
     const markResult = await deps.db.runTransaction(async (tx) => {
       const [roomDoc, playerDoc, authDoc] = await Promise.all([
         tx.get(roomRef),
@@ -367,6 +368,7 @@ export function createRoomLifecycleCallables(deps: RoomLifecycleDeps) {
 
   async function executePendingLeaveCleanupBatch(): Promise<{ processed: number; finalized: number }> {
     const now = Timestamp.now()
+    // collectionGroup은 전체 pending_leave를 훑을 수 있어서 배치 크기를 제한해 스케줄 함수가 길게 물리지 않게 한다.
     const pendingSnapshot = await deps.db
       .collectionGroup('participantAuth')
       .where('leaveGraceExpiresAt', '<=', now)
@@ -423,6 +425,7 @@ export function createRoomLifecycleCallables(deps: RoomLifecycleDeps) {
 
             const room = roomDoc.data() as { status?: RoomStatus }
             if (room.status !== STATUS_WAITING) {
+              // 게임이 이미 시작된 방은 자동 퇴장으로 건드리면 진행 중인 상태가 깨질 수 있어 복귀 처리한다.
               tx.update(authRef, {
                 status: AUTH_STATUS_ACTIVE,
                 leaveRequestedAt: FieldValue.delete(),
@@ -905,7 +908,7 @@ export function createRoomLifecycleCallables(deps: RoomLifecycleDeps) {
         if (playerId !== authUid) {
           throw new HttpsError('permission-denied', 'Player identity mismatch')
         }
-        // Preserve previous contract: missing room surfaces as not-found before auth checks.
+        // 기존 호출자는 없는 방을 먼저 not-found로 받기 때문에, 인증 세부 검사보다 방 존재 확인을 먼저 한다.
         await deps.getRoom(roomId)
         await deps.assertJoinedRoomPlayerRequest({ roomId, playerId, sessionToken, joinToken, authUid })
 
@@ -948,6 +951,7 @@ export function createRoomLifecycleCallables(deps: RoomLifecycleDeps) {
             throw new HttpsError('failed-precondition', 'All players must be ready before starting the game')
           }
 
+          // 새 게임 시작 시 이전 라운드 데이터가 섞이지 않도록 플레이어/세트 상태를 한 트랜잭션에서 초기화한다.
           playerDocs.forEach((doc) => {
             tx.update(doc.ref, {
               selectedAugments: [],

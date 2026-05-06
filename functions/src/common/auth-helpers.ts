@@ -32,6 +32,7 @@ function safeEqualHashHex(left: string, right: string): boolean {
   }
 
   try {
+    // 토큰 비교 시간으로 값이 새는 일을 줄이려고 해시끼리 상수 시간 비교를 쓴다.
     return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'))
   } catch {
     return false
@@ -170,6 +171,7 @@ export function createAuthHelpers(deps: AuthHelperDeps) {
     }
 
     if (legacyToken) {
+      // 예전 세션 문서는 평문 토큰이 남아 있을 수 있어서, 검증에 성공한 순간 해시 저장으로 갈아탄다.
       const legacyHash = hashToken(legacyToken)
       if (!safeEqualHashHex(legacyHash, presentedHash)) {
         deps.logWarn('auth.guestSession.invalid', { playerId, mode: 'legacy' })

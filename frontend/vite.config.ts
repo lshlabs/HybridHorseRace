@@ -6,7 +6,7 @@ import path from 'path'
 const DEV_SERVER_PORT = 5173
 const PHASER_CHUNK_WARNING_LIMIT_KB = 1300
 
-// https://vite.dev/config/
+// Vite 기본 설정은 공식 문서 형식을 그대로 따른다.
 export default defineConfig({
   plugins: [react()],
   resolve: {
@@ -38,11 +38,8 @@ export default defineConfig({
           if (id.includes('node_modules/react') || id.includes('node_modules/react-dom')) {
             return 'vendor-react'
           }
-          // NOTE:
-          // Forcing every game component into a single `game-core` chunk caused a circular
-          // dependency with `vendor-react` in production builds, which broke React namespace
-          // initialization (`forwardRef` became undefined at runtime). Let Rollup split app
-          // chunks naturally to avoid circular chunk init ordering issues.
+          // 게임 컴포넌트를 game-core로 강제 묶었을 때 vendor-react와 순환 초기화가 생겨
+          // 프로덕션에서 React 네임스페이스가 깨진 적이 있어 앱 청크는 Rollup 기본 분할에 맡긴다.
           return undefined
         },
       },

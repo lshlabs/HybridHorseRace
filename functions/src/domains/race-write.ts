@@ -316,6 +316,7 @@ export function createRaceWriteCallables(deps: RaceWriteDeps) {
         }
 
         const prepared = await buildPreparedRaceForSet({ roomId, setIndex })
+        // 레이스 재생 데이터가 커져도 callable 응답/문서 크기에 걸리지 않게 payload를 잘라 저장한다.
         const keyframeChunks = chunkKeyframes(prepared.replayScript.keyframes)
         const eventBuckets = bucketEventsByElapsed(prepared.replayScript.events)
         const raceStateMetadata = {
@@ -473,6 +474,7 @@ export function createRaceWriteCallables(deps: RaceWriteDeps) {
         }
 
         const now = Timestamp.now()
+        // 결과는 prepare 때 이미 확정되어 있고, startRace는 모든 클라가 같은 시작 시각으로 재생하게만 만든다.
         await setDocRef.set(
           {
             setIndex,
@@ -561,6 +563,7 @@ export function createRaceWriteCallables(deps: RaceWriteDeps) {
           const setData = setDoc.data() as { readyForNext?: Record<string, boolean> } | undefined
           const existingReadyForNext = setData?.readyForNext ?? {}
           if (existingReadyForNext[playerId] === true) {
+            // 같은 버튼 요청이 두 번 와도 ready 상태를 다시 쓰지 않고 현재 합의 상태만 돌려준다.
             return playerIds.every((id) => existingReadyForNext[id] === true)
           }
           const readyForNext = { ...existingReadyForNext, [playerId]: true }

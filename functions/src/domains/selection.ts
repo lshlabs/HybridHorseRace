@@ -242,6 +242,7 @@ export function createSelectionCallables(deps: SelectionDeps) {
             if (data.rarity && data.availableAugmentsByPlayer?.[playerId]) return data
           }
 
+          // 같은 방/세트에서는 모든 플레이어가 같은 등급 풀을 보도록 등급 seed를 세트 단위로 고정한다.
           const raritySeedKey = `augment-rarity|room:${roomId}|set:${setIndex}`
           const rarityRng = deps.createSeededRandom(raritySeedKey)
           const rarity = deps.pickRandomSeeded(deps.augmentRarities, rarityRng)
@@ -360,6 +361,7 @@ export function createSelectionCallables(deps: SelectionDeps) {
               const persistentStats = deps.applyAugmentToHorseStats(playerData.horseStats, augment)
               if (!persistentStats) return
 
+              // Luck 보너스는 이번 세트에만 쓰는 임시값이라, 나중에 되돌릴 수 있게 따로 기록한다.
               const luckBonus = deps.calculateLuckBonus(persistentStats.Luck)
               const nextHorseStats = deps.applyLuckBonusToHorseStats(persistentStats, luckBonus)
               tx.update(doc.ref, {
@@ -465,6 +467,7 @@ export function createSelectionCallables(deps: SelectionDeps) {
           }
 
           const rerollIndex = rerollUsed + 1
+          // 리롤마다 seed에 번호를 넣어 같은 요청 재시도와 새 리롤 결과가 섞이지 않게 한다.
           const seedKey = `augment|room:${roomId}|set:${setIndex}|player:${playerId}|reroll:${rerollIndex}`
           const rng = deps.createSeededRandom(seedKey)
           const rarity = setData?.rarity ?? deps.pickRandomSeeded(deps.augmentRarities, rng)

@@ -137,7 +137,7 @@ export function LobbyPage() {
         navigate('/', { replace: true })
       }
     } catch {
-      // ignore malformed redirect flag
+      // 세션 스토리지가 깨져도 로비 진입 자체는 막지 않는다.
     }
   }, [navigate, roomId])
 
@@ -205,6 +205,7 @@ export function LobbyPage() {
       const body = JSON.stringify(payload)
 
       if (typeof navigator.sendBeacon === 'function') {
+        // unload 순간에는 일반 fetch가 끊길 수 있어 sendBeacon을 먼저 시도한다.
         const sent = navigator.sendBeacon(url, body)
         if (sent) return
       }
@@ -215,7 +216,7 @@ export function LobbyPage() {
         keepalive: true,
         mode: 'no-cors',
       }).catch(() => {
-        // ignore unload-time failure
+        // 페이지가 닫히는 중이라 실패를 사용자에게 보여줄 방법도 없고, 서버 정리 작업이 한 번 더 확인한다.
       })
     },
     [getLeaveRoomUrl],
@@ -273,7 +274,7 @@ export function LobbyPage() {
           tryLeaveRoomOnExit()
         }
       } catch {
-        // ignore malformed url
+        // 잘못된 href 하나 때문에 전체 클릭 흐름이 막히면 안 된다.
       }
     }
 
@@ -290,7 +291,7 @@ export function LobbyPage() {
       if (!payload) return
       hasLeaveSentRef.current = true
       void leaveRoomCallable(payload).catch(() => {
-        // ignore unmount-time failure
+        // 라우트 전환 중 실패해도 pending leave 정리 흐름과 다음 접속에서 다시 맞춰진다.
       })
     }
   }, [getWaitingRoomLeavePayload])
@@ -356,6 +357,7 @@ export function LobbyPage() {
         previousAttempt?.key === autoJoinAttemptKey &&
         now - previousAttempt.at < AUTO_JOIN_DEDUPE_WINDOW_MS
       if (isDuplicateInWindow) {
+        // room snapshot과 세션 초기화가 거의 동시에 끝나면 자동 참가가 두 번 돌 수 있어 짧게 막는다.
         return null
       }
       lastAutoJoinAttemptRef.current = { key: autoJoinAttemptKey, at: now }

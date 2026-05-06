@@ -24,7 +24,7 @@ function writeStorageItem(key: string, value: string): void {
   try {
     localStorage.setItem(key, value)
   } catch {
-    // ignore storage write failures (private mode/quota)
+    // 시크릿 모드나 용량 문제여도 서버 세션 발급 자체는 계속 진행한다.
   }
 }
 
@@ -32,7 +32,7 @@ function removeStorageItem(key: string): void {
   try {
     localStorage.removeItem(key)
   } catch {
-    // ignore storage remove failures (private mode/quota)
+    // 저장소 접근 실패 때문에 로그아웃/초기화 흐름이 멈추지 않게 한다.
   }
 }
 
@@ -65,6 +65,7 @@ function readCachedSession(): GuestSession | null {
   try {
     return parseGuestSession(raw)
   } catch {
+    // 예전 형식이나 깨진 JSON이면 새 세션을 다시 받는 쪽이 안전하다.
     return null
   }
 }
