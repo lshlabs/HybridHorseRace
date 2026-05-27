@@ -3,6 +3,7 @@ import type { Room, Player } from '../../../../hooks/useRoom'
 import {
   getAugmentSelection,
   prepareRace,
+  getRaceTimeline,
   getRaceState,
   getSetResult,
   readyNextSet,
@@ -78,6 +79,48 @@ type AuthoritativeRaceFrame = {
   finished: Record<string, boolean>
 }
 
+type AuthoritativeRaceEvent =
+  | {
+      id: string
+      type: 'overtake'
+      elapsedMs: number
+      playerId: string
+      fromRank: number
+      toRank: number
+    }
+  | {
+      id: string
+      type: 'lastSpurt'
+      elapsedMs: number
+      playerId: string
+    }
+  | {
+      id: string
+      type: 'finish'
+      elapsedMs: number
+      playerId: string
+      rank: number
+    }
+  | {
+      id: string
+      type: 'slowmoTrigger'
+      elapsedMs: number
+    }
+
+type AuthoritativeTimeline = {
+  keyframes: AuthoritativeRaceFrame[]
+  events: AuthoritativeRaceEvent[]
+  rankings: Array<{ playerId: string; position: number; time: number }>
+  startedAtMillis: number | null
+  scriptVersion: string
+  raceStateDocVersion: string
+  outputFrameMs: number
+  simStepMs: number
+  trackLengthM: number
+  snapshotHash: string
+  slowmoTriggerMs: number | null
+}
+
 /** 물리 계산용 고정 스텝(초). 기록 시간은 서버 결과를 쓰지만 움직임 느낌에는 영향이 있다. */
 const PHYSICS_DT_SEC = 0.02
 const AUTHORITATIVE_POLL_INTERVAL_PREPARED_MS = 420
@@ -90,8 +133,9 @@ const AUTHORITATIVE_EVENTS_WINDOW_OVERLAP_MS = 1600
 const SET_RESULT_POLL_INITIAL_DELAY_MS = 280
 const SET_RESULT_POLL_MAX_DELAY_MS = 1100
 const SET_RESULT_POLL_BACKOFF_MULTIPLIER = 1.55
-// 폴링보다 약간 늦게 렌더하면 다음 키프레임이 들어와 있을 확률이 높아서 덜 끊겨 보인다.
-const AUTHORITATIVE_RENDER_DELAY_MS = 90
+// 서버 상태 polling은 running 중 180ms + 응답 지연 간격으로 도착한다.
+// 렌더를 더 늦춰 보유한 keyframe 범위 안에서 재생해야 말이 멈췄다가 점프하지 않는다.
+const AUTHORITATIVE_RENDER_DELAY_MS = 320
 // 서버 시간으로 바로 점프하지 않고 조금씩 따라가게 해서 시간축이 튀는 느낌을 줄인다.
 const AUTHORITATIVE_TIME_SOFT_CORRECTION_ALPHA = 0.15
 // 탭 복귀/폴링 지연으로 차이가 너무 커지면 바로 맞춘다. 천천히 맞추면 더 어색할 수 있다.
@@ -119,6 +163,8 @@ const FINAL_RESULT_BACKFILL_RETRY_MAX = 3
 const FINAL_RESULT_SET_FETCH_DEDUPE_WINDOW_MS = 1400
 const RACE_START_BOOTSTRAP_MIN_DURATION_MS = 700
 const RACE_START_BOOTSTRAP_MAX_WAIT_MS = 3000
+const AUTHORITATIVE_TIMELINE_PRELOAD_RETRY_MS = 320
+const AUTHORITATIVE_TIMELINE_PRELOAD_MAX_WAIT_MS = 15000
 const RACE_SCENE_KEY = 'RaceScene'
 const AUGMENT_SELECTION_SCENE_KEY = 'AugmentSelectionScene'
 const RACE_RESULT_SCENE_KEY = 'RaceResultScene'
@@ -219,6 +265,11 @@ export default class RaceScene extends Phaser.Scene {
   private authoritativeKeyframe?: AuthoritativeRaceFrame
   private authoritativeNextKeyframe?: AuthoritativeRaceFrame
   private authoritativeFrameBuffer: AuthoritativeRaceFrame[] = []
+  private authoritativeTimeline?: AuthoritativeTimeline
+  private authoritativeTimelineFrameCursorIndex = 0
+  private isAuthoritativeTimelinePreloaded = false
+  private isAuthoritativeTimelinePreloading = false
+  private authoritativeTimelinePreloadError: string | null = null
   private authoritativeEventsWindow: Array<{
     id: string
     type: string
@@ -503,6 +554,10 @@ export default class RaceScene extends Phaser.Scene {
 
   /** 게임 시작 전 증강 선택 표시 */
   private setupAugmentSelection() {
+    if (this.roomId && this.room?.status === ROOM_STATUS_RACING) {
+      this.startInProgressAuthoritativeRaceRecovery()
+      return
+    }
     void this.showAugmentSelection(generateRandomRarity())
   }
 
@@ -522,14 +577,18 @@ export default class RaceScene extends Phaser.Scene {
     if (this.isBootstrappingRaceStart) return
 
     // "게임을 시작하는 중..." 단계:
-    // 서버 prepareRace + getRaceState polling으로 keyframe을 먼저 받아두고,
-    // startedAt이 내려오기 전에는 실제 재생은 하지 않는다.
+    // 서버 prepareRace 후 전체 timeline을 먼저 받아두고,
+    // countdown은 로컬 timeline이 완성된 뒤에만 시작한다.
     this.isBootstrappingRaceStart = true
     this.raceStartBootstrapBeganAtMs = performance.now()
     this.raceStartBootstrapMinReadyAtMs =
       this.raceStartBootstrapBeganAtMs + RACE_START_BOOTSTRAP_MIN_DURATION_MS
     this.hasReceivedInitialAuthoritativeFrame = false
     this.hasReceivedAnyAuthoritativePollResponse = false
+    this.authoritativeTimeline = undefined
+    this.isAuthoritativeTimelinePreloaded = false
+    this.isAuthoritativeTimelinePreloading = false
+    this.authoritativeTimelinePreloadError = null
 
     this.horseManager.hidePlayerIndicator()
     this.waitingOverlayHandle?.close(false)
@@ -558,16 +617,253 @@ export default class RaceScene extends Phaser.Scene {
             reason: 'timeout',
           }),
         )
-        this.releaseRaceStartBootstrap({ reason: 'timeout' })
+        this.authoritativeTimelinePreloadError = 'Timeline preload is still retrying after timeout'
       },
     )
 
-    // bootstrap 단계에서는 prepare만 요청하고 startRace는 아직 호출하지 않는다.
-    void this.beginServerAuthoritativeRace({ requestStart: false })
+    // bootstrap 단계에서는 prepare + timeline preload만 수행하고 startRace는 아직 호출하지 않는다.
+    void this.preloadAuthoritativeTimelineForRaceStart(this.currentSet, {
+      onPreloaded: 'countdown',
+    })
+  }
+
+  private startInProgressAuthoritativeRaceRecovery() {
+    if (!this.isServerAuthoritativeRaceMode() || this.isBootstrappingRaceStart || this.isRaceStarted) return
+
+    this.prepareAllHorsesForRaceWithCurrentPlayers()
+    this.horseManager.hidePlayerIndicator()
+    this.flowUI.hideGUIForWaitingOverlay({
+      hud: this.hud,
+      progressBarManager: this.progressBarManager,
+      horseManager: this.horseManager,
+    })
+    this.waitingOverlayHandle?.close(false)
+    this.waitingOverlayHandle = this.flowUI.showWaiting(this, {
+      messageKey: 'game.startingRace',
+      durationMs: null,
+      onComplete: () => {
+        // in-progress recovery가 끝나거나 결과 집계로 넘어갈 때 직접 닫는다.
+      },
+    })
+
+    this.isBootstrappingRaceStart = true
+    this.raceStartBootstrapBeganAtMs = performance.now()
+    this.raceStartBootstrapMinReadyAtMs = performance.now()
+    this.authoritativeTimeline = undefined
+    this.isAuthoritativeTimelinePreloaded = false
+    this.isAuthoritativeTimelinePreloading = false
+    this.authoritativeTimelinePreloadError = null
+
+    void this.preloadAuthoritativeTimelineForRaceStart(this.currentSet, {
+      onPreloaded: 'recover-in-progress',
+    })
+  }
+
+  private waitForAuthoritativeTimelineRetry(): Promise<void> {
+    return new Promise((resolve) => {
+      this.time.delayedCall(AUTHORITATIVE_TIMELINE_PRELOAD_RETRY_MS, () => resolve())
+    })
+  }
+
+  private async prepareAuthoritativeTimelineIfHost(setIndex: number): Promise<void> {
+    if (
+      this.isServerRacePrepared ||
+      !this.isCurrentPlayerHost() ||
+      this.room?.status !== ROOM_STATUS_RACING ||
+      !this.roomId ||
+      !this.playerId ||
+      !this.sessionToken ||
+      !this.roomJoinToken
+    ) {
+      return
+    }
+
+    this.isServerRacePrepared = true
+    try {
+      await prepareRace({
+        roomId: this.roomId,
+        playerId: this.playerId,
+        sessionToken: this.sessionToken,
+        joinToken: this.roomJoinToken,
+        setIndex,
+      })
+    } catch (error) {
+      this.isServerRacePrepared = false
+      throw error
+    }
+  }
+
+  private validateAuthoritativeTimelineMetadata(
+    current: Record<string, unknown> | null,
+    next: Record<string, unknown>,
+  ): Record<string, unknown> {
+    if (!current) return next
+    const mismatchedKey = Object.keys(next).find((key) => current[key] !== next[key])
+    if (mismatchedKey) {
+      throw new Error(`Timeline metadata changed while preloading: ${mismatchedKey}`)
+    }
+    return current
+  }
+
+  private async preloadAuthoritativeTimelineForRaceStart(
+    setIndex: number,
+    options: { onPreloaded: 'countdown' | 'recover-in-progress' },
+  ): Promise<void> {
+    if (!this.roomId || !this.playerId || !this.sessionToken || !this.roomJoinToken || !this.room) {
+      return
+    }
+
+    this.isAuthoritativeTimelinePreloading = true
+    this.authoritativeTimelinePreloadError = null
+    const preloadStartedAtMs = performance.now()
+    let hasLoggedMaxWait = false
+
+    while (this.isBootstrappingRaceStart && this.currentSet === setIndex) {
+      const keyframeChunksByIndex = new Map<number, AuthoritativeRaceFrame[]>()
+      const eventBucketsByStart = new Map<number, AuthoritativeRaceEvent[]>()
+      let nextCursor:
+        | {
+            keyframeChunkIndex?: number
+            eventBucketStartElapsedMs?: number
+          }
+        | null
+        | undefined
+      let metadata: Record<string, unknown> | null = null
+
+      try {
+        await this.prepareAuthoritativeTimelineIfHost(setIndex)
+
+        do {
+          const response = await getRaceTimeline({
+            roomId: this.roomId,
+            playerId: this.playerId,
+            sessionToken: this.sessionToken,
+            joinToken: this.roomJoinToken,
+            setIndex,
+            ...(nextCursor ? { chunkCursor: nextCursor } : {}),
+          })
+          const page = response.data
+
+          if (!page.hasTimeline) {
+            break
+          }
+
+          metadata = this.validateAuthoritativeTimelineMetadata(metadata, {
+            scriptVersion: page.scriptVersion ?? '',
+            raceStateDocVersion: page.raceStateDocVersion ?? '',
+            snapshotHash: page.snapshotHash ?? '',
+            keyframeCount: page.keyframeCount ?? 0,
+            eventCount: page.eventCount ?? 0,
+            keyframeChunkCount: page.keyframeChunkCount ?? 0,
+            eventChunkCount: page.eventChunkCount ?? 0,
+          })
+
+          for (const chunk of page.keyframeChunks ?? []) {
+            keyframeChunksByIndex.set(chunk.chunkIndex, chunk.keyframes)
+          }
+          for (const bucket of page.eventBuckets ?? []) {
+            eventBucketsByStart.set(bucket.bucketStartElapsedMs, bucket.events)
+          }
+
+          nextCursor = page.nextCursor ?? null
+          if (nextCursor === null) {
+            const keyframes = Array.from(keyframeChunksByIndex.entries())
+              .sort((a, b) => a[0] - b[0])
+              .flatMap(([, frames]) => frames)
+            const events = Array.from(eventBucketsByStart.entries())
+              .sort((a, b) => a[0] - b[0])
+              .flatMap(([, bucketEvents]) => bucketEvents)
+              .sort((a, b) => a.elapsedMs - b.elapsedMs || a.id.localeCompare(b.id))
+            const expectedKeyframeCount = page.keyframeCount ?? 0
+            const expectedEventCount = page.eventCount ?? 0
+            if (keyframes.length !== expectedKeyframeCount || events.length !== expectedEventCount) {
+              throw new Error(
+                `Timeline preload count mismatch: keyframes ${keyframes.length}/${expectedKeyframeCount}, events ${events.length}/${expectedEventCount}`,
+              )
+            }
+            if (keyframes.length === 0) {
+              throw new Error('Timeline preload completed without keyframes')
+            }
+
+            this.authoritativeTimeline = {
+              keyframes,
+              events,
+              rankings: page.rankings ?? [],
+              startedAtMillis: page.startedAtMillis ?? null,
+              scriptVersion: page.scriptVersion ?? '',
+              raceStateDocVersion: page.raceStateDocVersion ?? '',
+              outputFrameMs: page.outputFrameMs ?? 50,
+              simStepMs: page.simStepMs ?? 50,
+              trackLengthM: page.trackLengthM ?? this.mapManager.getTrackLengthM(),
+              snapshotHash: page.snapshotHash ?? '',
+              slowmoTriggerMs: page.slowmoTriggerMs ?? null,
+            }
+            this.isAuthoritativeTimelinePreloaded = true
+            this.isAuthoritativeTimelinePreloading = false
+            this.authoritativeTimelinePreloadError = null
+            this.stopServerRaceStatePolling()
+            this.authoritativeKeyframe = keyframes[0]
+            this.authoritativeNextKeyframe = keyframes[1] ?? keyframes[0]
+            this.authoritativeFrameBuffer = keyframes.slice(0, 64)
+            this.authoritativeTimelineFrameCursorIndex = 0
+            this.authoritativeRaceStateStatus = page.status ?? 'prepared'
+            this.authoritativeRacePlan = {
+              rankings: page.rankings ?? [],
+              startedAtMillis: page.startedAtMillis ?? null,
+            }
+
+            if (import.meta.env.DEV) {
+              console.info('[RaceScene] authoritative timeline preload complete', {
+                roomId: this.roomId,
+                setIndex,
+                keyframeCount: keyframes.length,
+                eventCount: events.length,
+                snapshotHash: page.snapshotHash ?? '',
+              })
+            }
+            const remainingMinDurationMs = this.raceStartBootstrapMinReadyAtMs - performance.now()
+            if (remainingMinDurationMs > 0) {
+              await new Promise<void>((resolve) => {
+                this.time.delayedCall(remainingMinDurationMs, () => resolve())
+              })
+            }
+            if (!this.isBootstrappingRaceStart || this.currentSet !== setIndex) {
+              return
+            }
+            if (options.onPreloaded === 'recover-in-progress') {
+              this.resumeInProgressAuthoritativeRaceFromTimeline(setIndex)
+              return
+            }
+            this.releaseRaceStartBootstrap({ reason: 'timeline-preloaded' })
+            return
+          }
+        } while (nextCursor && this.isBootstrappingRaceStart && this.currentSet === setIndex)
+      } catch (error) {
+        this.authoritativeTimelinePreloadError =
+          error instanceof Error ? error.message : 'Timeline preload failed'
+        if (import.meta.env.DEV) {
+          console.warn('[RaceScene] authoritative timeline preload retrying:', error)
+        }
+      }
+
+      const elapsedMs = performance.now() - preloadStartedAtMs
+      if (!hasLoggedMaxWait && elapsedMs >= AUTHORITATIVE_TIMELINE_PRELOAD_MAX_WAIT_MS) {
+        hasLoggedMaxWait = true
+        console.warn('[RaceScene] authoritative timeline preload exceeded max wait; keeping overlay', {
+          roomId: this.roomId,
+          setIndex,
+          elapsedMs,
+          error: this.authoritativeTimelinePreloadError,
+        })
+      }
+      await this.waitForAuthoritativeTimelineRetry()
+    }
+
+    this.isAuthoritativeTimelinePreloading = false
   }
 
   private releaseRaceStartBootstrap(params: {
-    reason: 'first-frame' | 'timeout' | 'already-ready'
+    reason: 'first-frame' | 'timeout' | 'already-ready' | 'timeline-preloaded'
   }) {
     if (!this.isBootstrappingRaceStart) return
 
@@ -597,6 +893,49 @@ export default class RaceScene extends Phaser.Scene {
     this.raceStartBootstrapReadyForCountdown = true
     // bootstrap이 끝나면 그 다음에만 3,2,1,GO 카운트다운을 시작한다.
     this.startCountdown()
+  }
+
+  private resumeInProgressAuthoritativeRaceFromTimeline(setIndex: number) {
+    const timeline = this.authoritativeTimeline
+    const startedAtMillis = timeline?.startedAtMillis
+    if (!timeline || typeof startedAtMillis !== 'number') {
+      this.releaseRaceStartBootstrap({ reason: 'timeline-preloaded' })
+      return
+    }
+
+    const elapsedMs = Math.max(0, Date.now() - startedAtMillis)
+    const lastFrameElapsedMs = timeline.keyframes[timeline.keyframes.length - 1]?.elapsedMs ?? 0
+    this.isBootstrappingRaceStart = false
+    this.raceStartBootstrapBeganAtMs = null
+    this.raceStartBootstrapMinReadyAtMs = 0
+    this.raceStartBootstrapTimeoutEvent?.remove(false)
+    this.raceStartBootstrapTimeoutEvent = undefined
+
+    if (elapsedMs >= lastFrameElapsedMs) {
+      this.waitingOverlayHandle?.close(false)
+      this.waitingOverlayHandle = undefined
+      this.startResultAggregationOverlay()
+      return
+    }
+
+    this.waitingOverlayHandle?.close(false)
+    this.waitingOverlayHandle = undefined
+    this.flowUI.showGUIAfterWaitingOverlay({
+      hud: this.hud,
+      horseManager: this.horseManager,
+    })
+    this.applyAuthoritativeStartedAtMillis(startedAtMillis)
+    this.raceStartBootstrapReadyForCountdown = false
+    this.commitRaceStartRuntime()
+
+    if (import.meta.env.DEV) {
+      console.info('[RaceScene] recovered in-progress authoritative race', {
+        roomId: this.roomId,
+        setIndex,
+        elapsedMs,
+        lastFrameElapsedMs,
+      })
+    }
   }
 
   private tryReleaseRaceStartBootstrapIfReady(reason: 'first-frame' | 'already-ready') {
@@ -646,6 +985,7 @@ export default class RaceScene extends Phaser.Scene {
         return
       }
       this.raceStartBootstrapReadyForCountdown = false
+      this.beginLocalAuthoritativeTimelinePlaybackIfNeeded()
       // 서버 startRace는 실제 출발 타이밍(GO 직후)에 맞춰서 호출한다.
       void this.beginServerAuthoritativeRace({ requestStart: true })
       this.commitRaceStartRuntime()
@@ -653,6 +993,24 @@ export default class RaceScene extends Phaser.Scene {
     }
 
     this.commitRaceStartRuntime()
+  }
+
+  private beginLocalAuthoritativeTimelinePlaybackIfNeeded() {
+    if (!this.isAuthoritativeTimelinePreloaded || !this.authoritativeTimeline) return
+    if (this.authoritativeRacePlan?.startedAtMillis) return
+    const startedAtMillis = Date.now()
+    this.authoritativeTimeline = {
+      ...this.authoritativeTimeline,
+      startedAtMillis,
+    }
+    this.authoritativeRacePlan = {
+      rankings: this.authoritativeTimeline.rankings,
+      startedAtMillis,
+    }
+    this.authoritativeRaceStateStatus = 'running'
+    this.authoritativeElapsedMs = 0
+    this.authoritativeNowMs = startedAtMillis
+    this.lastAuthoritativePollClientTimeMs = performance.now()
   }
 
   private async beginServerAuthoritativeRace(options?: { requestStart?: boolean }) {
@@ -680,8 +1038,11 @@ export default class RaceScene extends Phaser.Scene {
       this.tryReleaseRaceStartBootstrapIfReady('already-ready')
     }
 
-    // prepare/start 어느 단계든 polling은 계속 유지해서 prepared/running 상태 변화를 받는다.
-    this.startServerRaceStatePolling(setIndex)
+    // 정상 경로는 preload된 timeline으로 재생한다. getRaceState polling은 preload 실패/미사용 시
+    // 임시 fallback으로만 남겨둔다.
+    if (this.shouldUseServerRaceStatePollingFallback()) {
+      this.startServerRaceStatePolling(setIndex)
+    }
 
     try {
       if (
@@ -708,13 +1069,14 @@ export default class RaceScene extends Phaser.Scene {
       ) {
         this.isServerRaceRequested = true
         // 실제 출발 타이밍에 host가 startRace를 호출해서 startedAt을 확정한다.
-        await startRace({
+        const response = await startRace({
           roomId: this.roomId,
           playerId: this.playerId,
           sessionToken: this.sessionToken,
           joinToken: this.roomJoinToken,
           setIndex,
         })
+        this.applyAuthoritativeStartedAtMillis(response.data.startedAtMillis)
       }
     } catch (error) {
       if (!shouldRequestStart) {
@@ -724,6 +1086,24 @@ export default class RaceScene extends Phaser.Scene {
       }
       console.warn('[RaceScene] Failed to bootstrap server-authoritative race:', error)
     }
+  }
+
+  private applyAuthoritativeStartedAtMillis(startedAtMillis: number | null | undefined) {
+    if (typeof startedAtMillis !== 'number') return
+    this.authoritativeRacePlan = {
+      rankings: this.authoritativeRacePlan?.rankings ?? this.authoritativeTimeline?.rankings ?? [],
+      startedAtMillis,
+    }
+    if (this.authoritativeTimeline) {
+      this.authoritativeTimeline = {
+        ...this.authoritativeTimeline,
+        startedAtMillis,
+      }
+    }
+    this.authoritativeRaceStateStatus = 'running'
+    this.authoritativeElapsedMs = Math.max(0, Date.now() - startedAtMillis)
+    this.authoritativeNowMs = Date.now()
+    this.lastAuthoritativePollClientTimeMs = performance.now()
   }
 
   private computeNextAuthoritativePollDelayMs(): number {
@@ -754,6 +1134,10 @@ export default class RaceScene extends Phaser.Scene {
   }
 
   private scheduleNextServerRaceStatePoll(setIndex: number, delayMs: number) {
+    if (!this.shouldUseServerRaceStatePollingFallback()) {
+      this.stopServerRaceStatePolling()
+      return
+    }
     this.serverRacePollEvent?.remove(false)
     this.serverRacePollEvent = this.time.delayedCall(delayMs, () => {
       void this.pollServerRaceState(setIndex)
@@ -761,6 +1145,10 @@ export default class RaceScene extends Phaser.Scene {
   }
 
   private async pollServerRaceState(setIndex: number) {
+    if (!this.shouldUseServerRaceStatePollingFallback()) {
+      this.stopServerRaceStatePolling()
+      return
+    }
     if (
       !this.roomId ||
       !this.playerId ||
@@ -838,6 +1226,12 @@ export default class RaceScene extends Phaser.Scene {
           })),
           startedAtMillis: nextStartedAtMillis,
         }
+        if (this.authoritativeTimeline && typeof nextStartedAtMillis === 'number') {
+          this.authoritativeTimeline = {
+            ...this.authoritativeTimeline,
+            startedAtMillis: nextStartedAtMillis,
+          }
+        }
       }
 
       if (shouldMarkInitialAuthoritativeFrameReceived(response.data)) {
@@ -855,15 +1249,24 @@ export default class RaceScene extends Phaser.Scene {
       console.warn('[RaceScene] getRaceState polling failed:', error)
     } finally {
       this.isPollingServerRaceResult = false
-      this.scheduleNextServerRaceStatePoll(setIndex, this.computeNextAuthoritativePollDelayMs())
+      if (this.shouldUseServerRaceStatePollingFallback()) {
+        this.scheduleNextServerRaceStatePoll(setIndex, this.computeNextAuthoritativePollDelayMs())
+      }
     }
   }
 
+  private shouldUseServerRaceStatePollingFallback(): boolean {
+    return !this.isAuthoritativeTimelinePreloaded
+  }
+
+  private stopServerRaceStatePolling() {
+    this.serverRacePollEvent?.remove(false)
+    this.serverRacePollEvent = undefined
+  }
+
   private startServerRaceStatePolling(setIndex: number) {
-    if (this.serverRacePollEvent) {
-      this.serverRacePollEvent.remove(false)
-      this.serverRacePollEvent = undefined
-    }
+    if (!this.shouldUseServerRaceStatePollingFallback()) return
+    this.stopServerRaceStatePolling()
     this.consecutiveAuthoritativePollFailureCount = 0
     void this.pollServerRaceState(setIndex)
   }
@@ -903,6 +1306,41 @@ export default class RaceScene extends Phaser.Scene {
       next = current
     }
 
+    return { current, next }
+  }
+
+  private resolveTimelineFramePairForElapsed(renderElapsedMs: number): {
+    current: AuthoritativeRaceFrame
+    next: AuthoritativeRaceFrame
+  } | null {
+    const frames = this.authoritativeTimeline?.keyframes
+    if (!this.isAuthoritativeTimelinePreloaded || !frames?.length) return null
+
+    const firstFrame = frames[0]
+    const lastFrame = frames[frames.length - 1]
+    if (renderElapsedMs <= firstFrame.elapsedMs) {
+      this.authoritativeTimelineFrameCursorIndex = 0
+      return { current: firstFrame, next: firstFrame }
+    }
+    if (renderElapsedMs >= lastFrame.elapsedMs) {
+      this.authoritativeTimelineFrameCursorIndex = frames.length - 1
+      return { current: lastFrame, next: lastFrame }
+    }
+
+    let cursor = Math.min(
+      Math.max(0, this.authoritativeTimelineFrameCursorIndex),
+      frames.length - 1,
+    )
+    while (cursor > 0 && frames[cursor].elapsedMs > renderElapsedMs) {
+      cursor -= 1
+    }
+    while (cursor < frames.length - 1 && frames[cursor + 1].elapsedMs <= renderElapsedMs) {
+      cursor += 1
+    }
+    this.authoritativeTimelineFrameCursorIndex = cursor
+
+    const current = frames[cursor]
+    const next = frames[cursor + 1] ?? current
     return { current, next }
   }
 
@@ -1357,7 +1795,11 @@ export default class RaceScene extends Phaser.Scene {
   }
 
   private consumeAuthoritativeRaceEvents(renderElapsedMs: number) {
-    this.authoritativeEventsWindow.forEach((event) => {
+    const events =
+      this.isAuthoritativeTimelinePreloaded && this.authoritativeTimeline
+        ? this.authoritativeTimeline.events
+        : this.authoritativeEventsWindow
+    events.forEach((event) => {
       if (this.consumedRaceEventIds.has(event.id)) return
       if (event.elapsedMs > renderElapsedMs + AUTHORITATIVE_EVENT_CONSUME_TOLERANCE_MS) return
       this.consumedRaceEventIds.add(event.id)
@@ -1366,10 +1808,10 @@ export default class RaceScene extends Phaser.Scene {
         return
       }
       if (event.type === 'finish') {
-        if (event.playerId) {
+        if ('playerId' in event && event.playerId) {
           this.authoritativeFinishedPlayerIds.add(event.playerId)
         }
-        if (event.rank === 1) {
+        if ('rank' in event && event.rank === 1) {
           this.authoritativeWinnerFinishedEventSeen = true
           if (!this.isFinishSequenceTriggered) {
             this.triggerFinishSequence(this.getWinnerHorseIndex() ?? undefined)
@@ -1573,10 +2015,14 @@ export default class RaceScene extends Phaser.Scene {
     if (!simHorses.length) return false
     const renderElapsedMs = this.computeAuthoritativeRenderElapsedMs(deltaMs)
 
-    const framePair = this.resolveFramePairForElapsed(renderElapsedMs)
+    const framePair = this.isAuthoritativeTimelinePreloaded
+      ? this.resolveTimelineFramePairForElapsed(renderElapsedMs)
+      : this.resolveFramePairForElapsed(renderElapsedMs)
     const currentFrame = framePair?.current ?? this.authoritativeKeyframe
     const nextFrame = framePair?.next ?? this.authoritativeNextKeyframe ?? currentFrame
     if (!currentFrame || !nextFrame) return false
+    this.authoritativeKeyframe = currentFrame
+    this.authoritativeNextKeyframe = nextFrame
     const frameSpan = Math.max(1, nextFrame.elapsedMs - currentFrame.elapsedMs)
     const t = Math.max(0, Math.min(1, (renderElapsedMs - currentFrame.elapsedMs) / frameSpan))
     const frameSpanSec = frameSpan / 1000
@@ -2099,7 +2545,32 @@ export default class RaceScene extends Phaser.Scene {
 
   // F9 콘솔/클립보드 출력용: 한 줄 스냅샷 포맷
   private buildAuthoritativeDebugSnapshotLine(): string {
-    return buildAuthoritativeDebugSnapshotLineHelper({
+    const timeline = this.authoritativeTimeline
+    return [
+      buildAuthoritativeDebugSnapshotLineHelper({
+        currentSet: this.currentSet,
+        simElapsedSec: this.simElapsedSec,
+        metrics: this.authoritativeMetrics,
+      }),
+      `timelinePreloaded=${this.isAuthoritativeTimelinePreloaded}`,
+      `timelinePreloading=${this.isAuthoritativeTimelinePreloading}`,
+      `timelineFrames=${timeline?.keyframes.length ?? 0}`,
+      `timelineEvents=${timeline?.events.length ?? 0}`,
+      `timelineError=${this.authoritativeTimelinePreloadError ?? 'none'}`,
+    ].join(' ')
+  }
+
+  private buildAuthoritativeTimelineDebugOverlayText(): string {
+    const timeline = this.authoritativeTimeline
+    return [
+      `timeline preloaded=${this.isAuthoritativeTimelinePreloaded} preloading=${this.isAuthoritativeTimelinePreloading}`,
+      `timeline frames=${timeline?.keyframes.length ?? 0} events=${timeline?.events.length ?? 0}`,
+      `timeline error=${this.authoritativeTimelinePreloadError ?? 'none'}`,
+    ].join('\n')
+  }
+
+  private buildAuthoritativeDebugOverlayBaseText(): string {
+    return buildAuthoritativeDebugOverlayTextHelper({
       currentSet: this.currentSet,
       simElapsedSec: this.simElapsedSec,
       metrics: this.authoritativeMetrics,
@@ -2131,11 +2602,10 @@ export default class RaceScene extends Phaser.Scene {
 
   // 화면 오버레이용: 여러 줄 가독성 포맷
   private buildAuthoritativeDebugOverlayText(): string {
-    return buildAuthoritativeDebugOverlayTextHelper({
-      currentSet: this.currentSet,
-      simElapsedSec: this.simElapsedSec,
-      metrics: this.authoritativeMetrics,
-    })
+    return [
+      this.buildAuthoritativeDebugOverlayBaseText(),
+      this.buildAuthoritativeTimelineDebugOverlayText(),
+    ].join('\n')
   }
 
   private resetAuthoritativeReplayState() {
@@ -2151,6 +2621,11 @@ export default class RaceScene extends Phaser.Scene {
     this.authoritativeKeyframe = undefined
     this.authoritativeNextKeyframe = undefined
     this.authoritativeFrameBuffer = []
+    this.authoritativeTimeline = undefined
+    this.authoritativeTimelineFrameCursorIndex = 0
+    this.isAuthoritativeTimelinePreloaded = false
+    this.isAuthoritativeTimelinePreloading = false
+    this.authoritativeTimelinePreloadError = null
     this.authoritativeEventsWindow = []
     this.consumedRaceEventIds.clear()
     this.authoritativeFinishedPlayerIds.clear()
@@ -2176,8 +2651,7 @@ export default class RaceScene extends Phaser.Scene {
     this.isServerRacePrepared = false
     this.lastSetResultFetchAttemptMsBySet.clear()
     this.isPollingServerRaceResult = false
-    this.serverRacePollEvent?.remove(false)
-    this.serverRacePollEvent = undefined
+    this.stopServerRaceStatePolling()
   }
 
   private renderAuthoritativeDebugOverlay() {

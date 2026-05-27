@@ -170,18 +170,6 @@ export const leaveRoom = createCallable<
   { success: boolean }
 >('leaveRoom')
 
-export const updateRoomSettings = createCallable<
-  {
-    roomId: string
-    playerId: string
-    sessionToken: string
-    joinToken: string
-    roundCount?: number
-    rerollLimit?: number
-  },
-  { success: boolean }
->('updateRoomSettings')
-
 export const startGame = createCallable<
   { roomId: string; playerId: string; sessionToken: string; joinToken: string },
   { success: boolean; status: string }
@@ -272,11 +260,6 @@ export const prepareRace = createCallable<
     keyframeCount?: number
   }
 >('prepareRace')
-
-export const skipSet = createCallable<
-  { roomId: string; playerId: string; sessionToken: string; joinToken: string; setIndex: number },
-  { success: boolean }
->('skipSet')
 
 export const readyNextSet = createCallable<
   { roomId: string; playerId: string; sessionToken: string; joinToken: string; setIndex: number },
@@ -399,26 +382,89 @@ export const getRaceState = createCallable<
   }
 >('getRaceState')
 
-export const submitFinalRaceResult = createCallable<
+export const getRaceTimeline = createCallable<
   {
     roomId: string
     playerId: string
     sessionToken: string
     joinToken: string
-    finalRankings: Array<{
-      rank: number
-      name: string
-      totalScore: number
-      roundResults: Array<{
-        rank: number
-        name: string
-        time: number
-        finished: boolean
-      } | null>
-    }>
+    setIndex: number
+    chunkCursor?: {
+      keyframeChunkIndex?: number
+      eventBucketStartElapsedMs?: number
+    }
   },
-  { success: boolean }
->('submitFinalRaceResult')
+  {
+    success: boolean
+    hasTimeline: boolean
+    status?: 'prepared' | 'running' | 'completed'
+    setIndex?: number
+    scriptVersion?: string
+    raceStateDocVersion?: string
+    startedAtMillis?: number | null
+    simStepMs?: number
+    outputFrameMs?: number
+    tickIntervalMs?: number
+    trackLengthM?: number
+    snapshotHash?: string
+    slowmoTriggerMs?: number | null
+    rankings?: Array<{ playerId: string; time: number; position: number }>
+    keyframeChunkSize?: number
+    keyframeChunkCount?: number
+    keyframeCount?: number
+    eventBucketMs?: number
+    eventChunkCount?: number
+    eventCount?: number
+    keyframeChunks?: Array<{
+      chunkIndex: number
+      startIndex: number
+      keyframes: Array<{
+        elapsedMs: number
+        positions: Record<string, number>
+        speeds: Record<string, number>
+        stamina: Record<string, number>
+        finished: Record<string, boolean>
+      }>
+    }>
+    eventBuckets?: Array<{
+      bucketStartElapsedMs: number
+      bucketEndElapsedMs: number
+      eventBucketMs: number
+      events: Array<
+        | {
+            id: string
+            type: 'overtake'
+            elapsedMs: number
+            playerId: string
+            fromRank: number
+            toRank: number
+          }
+        | {
+            id: string
+            type: 'lastSpurt'
+            elapsedMs: number
+            playerId: string
+          }
+        | {
+            id: string
+            type: 'finish'
+            elapsedMs: number
+            playerId: string
+            rank: number
+          }
+        | {
+            id: string
+            type: 'slowmoTrigger'
+            elapsedMs: number
+          }
+      >
+    }>
+    nextCursor?: {
+      keyframeChunkIndex?: number
+      eventBucketStartElapsedMs?: number
+    } | null
+  }
+>('getRaceTimeline')
 
 export const setPlayerReady = createCallable<
   { roomId: string; playerId: string; sessionToken: string; joinToken: string; isReady: boolean },

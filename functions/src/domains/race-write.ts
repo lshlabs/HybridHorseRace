@@ -67,7 +67,6 @@ const authenticatedSetRequestSchema = {
 const startRaceSchema = z.object(authenticatedSetRequestSchema)
 const prepareRaceSchema = startRaceSchema
 
-const skipSetSchema = z.object(authenticatedSetRequestSchema)
 const readyNextSetSchema = z.object(authenticatedSetRequestSchema)
 const STATUS_RACING: RoomStatus = 'racing'
 const STATUS_SET_RESULT: RoomStatus = 'setResult'
@@ -656,53 +655,5 @@ export function createRaceWriteCallables(deps: RaceWriteDeps) {
     },
   )
 
-  const skipSet = onCall(
-    CALLABLE_OPTIONS,
-    async (request) => {
-      try {
-        const authUid = requireAuthUid(request)
-        const { roomId, playerId, sessionToken, joinToken, setIndex } = parseOrThrow(
-          skipSetSchema,
-          request.data,
-        )
-        if (playerId !== authUid) {
-          throw new HttpsError('permission-denied', 'Player identity mismatch')
-        }
-        const room = await deps.getRoom(roomId)
-        await deps.assertJoinedRoomHostRequest({
-          roomId,
-          playerId,
-          sessionToken,
-          joinToken,
-          authUid,
-          hostErrorMessage: 'Only host can skip set',
-        })
-
-        if (room.status !== STATUS_RACING && room.status !== STATUS_SET_RESULT) {
-          throw new HttpsError('failed-precondition', 'Set can only be skipped during race/result phase')
-        }
-        if (setIndex !== room.currentSet) {
-          throw new HttpsError('failed-precondition', 'Invalid set index for current room state')
-        }
-
-        const isLastSet = room.currentSet >= room.roundCount
-        const nextStatus: RoomStatus = isLastSet ? STATUS_FINISHED : STATUS_AUGMENT_SELECTION
-        const nextSet = isLastSet ? room.currentSet : room.currentSet + 1
-
-        await deps.db.collection('rooms').doc(roomId).update({
-          status: nextStatus,
-          currentSet: nextSet,
-          updatedAt: Timestamp.now(),
-        })
-
-        deps.logger.info('Set skipped', { roomId, setIndex, nextStatus, nextSet })
-        return { success: true, nextStatus, currentSet: nextSet }
-      } catch (error) {
-        deps.logger.error('skipSet error', error)
-        rethrowUnexpected(error, 'Failed to skip set')
-      }
-    },
-  )
-
-  return { prepareRace, startRace, readyNextSet, skipSet }
+  return { prepareRace, startRace, readyNextSet }
 }

@@ -38,13 +38,6 @@ export async function getPlayer(roomId: string, playerId: string): Promise<Playe
   return playerDoc.data() as Player
 }
 
-export async function getAllPlayers(roomId: string): Promise<Player[]> {
-  const db = getDb()
-  const playersSnapshot = await getPlayersRef(db, roomId).get()
-
-  return playersSnapshot.docs.map((doc) => doc.data() as Player)
-}
-
 export async function updateRoomStatus(roomId: string, status: RoomStatus): Promise<void> {
   const db = getDb()
   const roomRef = getRoomRef(db, roomId)
@@ -62,15 +55,4 @@ export async function isHost(roomId: string, playerId: string): Promise<boolean>
 export async function isPlayerInRoom(roomId: string, playerId: string): Promise<boolean> {
   const player = await getPlayer(roomId, playerId)
   return player !== null
-}
-
-export async function areAllPlayersReady(roomId: string): Promise<boolean> {
-  const players = await getAllPlayers(roomId)
-  const guestPlayers = players.filter((player) => !player.isHost)
-
-  if (guestPlayers.length === 0) {
-    return false
-  }
-
-  return guestPlayers.every((player) => player.isReady)
 }

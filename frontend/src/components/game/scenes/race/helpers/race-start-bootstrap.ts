@@ -12,7 +12,11 @@ export type RaceStartBootstrapReleaseParams = {
   minReadyAtMs: number
 }
 
-export type RaceStartBootstrapDebugReason = 'first-frame' | 'timeout' | 'already-ready'
+export type RaceStartBootstrapDebugReason =
+  | 'first-frame'
+  | 'timeout'
+  | 'already-ready'
+  | 'timeline-preloaded'
 
 function hasRaceState(data: RaceStateBootstrapResponseData): boolean {
   return data.hasRaceState === true

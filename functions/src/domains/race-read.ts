@@ -71,6 +71,15 @@ const getRaceStateSchema = z.object({
   eventsSinceElapsedMs: z.number().min(0).optional(),
   includeObservability: z.boolean().optional(),
 })
+const getRaceTimelineSchema = z.object({
+  ...authenticatedSetRequestSchema,
+  chunkCursor: z
+    .object({
+      keyframeChunkIndex: z.number().int().min(0).optional(),
+      eventBucketStartElapsedMs: z.number().int().min(0).optional(),
+    })
+    .optional(),
+})
 const getSetResultWithObservabilitySchema = z.object({
   ...authenticatedSetRequestSchema,
   includeObservability: z.boolean().optional(),
@@ -79,6 +88,8 @@ const DEFAULT_RACE_STATE_PAYLOAD_DOC_ID = 'payload'
 const RACE_STATE_PAYLOAD_FORMAT_CHUNKED_V2 = 'chunked-v2'
 const DEFAULT_KEYFRAME_CHUNK_SIZE = 32
 const DEFAULT_EVENT_BUCKET_MS = 1000
+const RACE_TIMELINE_KEYFRAME_CHUNKS_PER_PAGE = 4
+const RACE_TIMELINE_EVENT_BUCKETS_PER_PAGE = 4
 const MIN_OUTPUT_FRAME_MS = 1
 const RACE_STATE_PAYLOAD_CACHE_MAX_ENTRIES = 64
 const RACE_STATE_PAYLOAD_CACHE_TTL_MS = 15_000
@@ -86,6 +97,7 @@ const READ_PERF_LOG_SAMPLE_MOD = 20
 const READ_OBSERVABILITY_EXPOSE_ENV_KEY = 'FUNCTIONS_EXPOSE_READ_OBSERVABILITY'
 const SHOULD_EXPOSE_READ_OBSERVABILITY = process.env[READ_OBSERVABILITY_EXPOSE_ENV_KEY] === 'true'
 let raceStateReadCount = 0
+let raceTimelineReadCount = 0
 let setResultReadCount = 0
 
 type CachedRaceStatePayload = {
@@ -154,11 +166,15 @@ type SetResultSummary = {
   generatedAt?: FirebaseFirestore.Timestamp
 }
 
-function shouldSampleRead(action: 'getRaceState' | 'getSetResult'): boolean {
+function shouldSampleRead(action: 'getRaceState' | 'getRaceTimeline' | 'getSetResult'): boolean {
   // 자주 호출되는 callable이라 모든 요청을 로그로 남기지 않고 고정 비율로만 찍는다.
   if (action === 'getRaceState') {
     raceStateReadCount += 1
     return raceStateReadCount % READ_PERF_LOG_SAMPLE_MOD === 0
+  }
+  if (action === 'getRaceTimeline') {
+    raceTimelineReadCount += 1
+    return raceTimelineReadCount % READ_PERF_LOG_SAMPLE_MOD === 0
   }
   setResultReadCount += 1
   return setResultReadCount % READ_PERF_LOG_SAMPLE_MOD === 0
@@ -337,6 +353,169 @@ export function createRaceReadCallables(deps: RaceReadDeps) {
         eventBucketReads: eventBucketRefs.length,
         eventWindowCount: eventsWindow.length,
       },
+    }
+  }
+
+  async function buildChunkedRaceTimelineResponse(params: {
+    setIndex: number
+    setDocRef: FirebaseFirestore.DocumentReference
+    setData: GetRaceStateSetDocData | undefined
+    chunkCursor?: {
+      keyframeChunkIndex?: number
+      eventBucketStartElapsedMs?: number
+    }
+  }) {
+    const raceState = params.setData?.raceState
+    const keyframeCount = raceState?.keyframeCount ?? 0
+    const keyframeChunkCount = raceState?.keyframeChunkCount ?? 0
+    if (
+      !raceState ||
+      raceState.payloadFormat !== RACE_STATE_PAYLOAD_FORMAT_CHUNKED_V2 ||
+      keyframeCount <= 0 ||
+      keyframeChunkCount <= 0
+    ) {
+      return {
+        success: true as const,
+        hasTimeline: false as const,
+      }
+    }
+
+    const keyframeChunkSize = Math.max(1, raceState.keyframeChunkSize ?? DEFAULT_KEYFRAME_CHUNK_SIZE)
+    const eventBucketMs = Math.max(1, raceState.eventBucketMs ?? DEFAULT_EVENT_BUCKET_MS)
+    const eventChunkCount = Math.max(0, raceState.eventChunkCount ?? 0)
+    const requestedKeyframeChunkIndex =
+      params.chunkCursor && typeof params.chunkCursor.keyframeChunkIndex !== 'number'
+        ? keyframeChunkCount
+        : params.chunkCursor?.keyframeChunkIndex ?? 0
+    const keyframeChunkIndex = Math.min(
+      keyframeChunkCount,
+      Math.max(0, requestedKeyframeChunkIndex),
+    )
+    const keyframeChunkEndIndex = Math.min(
+      keyframeChunkCount,
+      keyframeChunkIndex + RACE_TIMELINE_KEYFRAME_CHUNKS_PER_PAGE,
+    )
+    const keyframeChunkRefs: FirebaseFirestore.DocumentReference[] = []
+    for (let chunkIndex = keyframeChunkIndex; chunkIndex < keyframeChunkEndIndex; chunkIndex += 1) {
+      keyframeChunkRefs.push(
+        params.setDocRef.collection('raceStatePayloadKeyframes').doc(`chunk-${chunkIndex}`),
+      )
+    }
+    const keyframeChunkSnapshots =
+      keyframeChunkRefs.length > 0 ? await deps.db.getAll(...keyframeChunkRefs) : []
+    const keyframeChunks = keyframeChunkSnapshots
+      .map((snapshot) => snapshot.data() as
+        | {
+            chunkIndex?: number
+            startIndex?: number
+            keyframes?: ServerRaceKeyframe[]
+          }
+        | undefined)
+      .filter(
+        (
+          chunk,
+        ): chunk is {
+          chunkIndex: number
+          startIndex: number
+          keyframes: ServerRaceKeyframe[]
+        } =>
+          typeof chunk?.chunkIndex === 'number' &&
+          typeof chunk?.startIndex === 'number' &&
+          Array.isArray(chunk?.keyframes),
+      )
+      .sort((a, b) => a.chunkIndex - b.chunkIndex)
+    if (keyframeChunkRefs.length > 0 && keyframeChunks.length !== keyframeChunkRefs.length) {
+      return {
+        success: true as const,
+        hasTimeline: false as const,
+      }
+    }
+
+    const shouldReadEventBuckets =
+      eventChunkCount > 0 &&
+      (!params.chunkCursor || typeof params.chunkCursor.eventBucketStartElapsedMs === 'number')
+    const eventBucketStartElapsedMs = params.chunkCursor?.eventBucketStartElapsedMs ?? 0
+    let eventBucketQuery = params.setDocRef
+      .collection('raceStatePayloadEvents')
+      .orderBy('bucketStartElapsedMs')
+      .limit(RACE_TIMELINE_EVENT_BUCKETS_PER_PAGE)
+    if (eventBucketStartElapsedMs > 0) {
+      eventBucketQuery = params.setDocRef
+        .collection('raceStatePayloadEvents')
+        .where('bucketStartElapsedMs', '>=', eventBucketStartElapsedMs)
+        .orderBy('bucketStartElapsedMs')
+        .limit(RACE_TIMELINE_EVENT_BUCKETS_PER_PAGE)
+    }
+    const eventBuckets = shouldReadEventBuckets ? await eventBucketQuery.get() : null
+    const eventBucketData = eventBuckets
+      ? eventBuckets.docs
+          .map((snapshot) => snapshot.data() as
+            | {
+                bucketStartElapsedMs?: number
+                bucketEndElapsedMs?: number
+                eventBucketMs?: number
+                events?: ServerRaceEvent[]
+              }
+            | undefined)
+          .filter(
+            (
+              bucket,
+            ): bucket is {
+              bucketStartElapsedMs: number
+              bucketEndElapsedMs: number
+              eventBucketMs: number
+              events: ServerRaceEvent[]
+            } =>
+              typeof bucket?.bucketStartElapsedMs === 'number' &&
+              typeof bucket?.bucketEndElapsedMs === 'number' &&
+              typeof bucket?.eventBucketMs === 'number' &&
+              Array.isArray(bucket?.events),
+          )
+      : []
+
+    const nextKeyframeChunkIndex =
+      keyframeChunkEndIndex < keyframeChunkCount ? keyframeChunkEndIndex : undefined
+    const lastEventBucket = eventBucketData[eventBucketData.length - 1]
+    const nextEventBucketStartElapsedMs =
+      eventBuckets && eventBuckets.size === RACE_TIMELINE_EVENT_BUCKETS_PER_PAGE && lastEventBucket
+        ? lastEventBucket.bucketStartElapsedMs + eventBucketMs
+        : undefined
+    const nextCursor =
+      typeof nextKeyframeChunkIndex === 'number' || typeof nextEventBucketStartElapsedMs === 'number'
+        ? {
+            ...(typeof nextKeyframeChunkIndex === 'number'
+              ? { keyframeChunkIndex: nextKeyframeChunkIndex }
+              : {}),
+            ...(typeof nextEventBucketStartElapsedMs === 'number'
+              ? { eventBucketStartElapsedMs: nextEventBucketStartElapsedMs }
+              : {}),
+          }
+        : null
+
+    return {
+      success: true as const,
+      hasTimeline: true as const,
+      setIndex: params.setIndex,
+      status: raceState.status ?? 'prepared',
+      scriptVersion: raceState.scriptVersion ?? '',
+      raceStateDocVersion: raceState.raceStateDocVersion ?? '',
+      startedAtMillis: raceState.startedAt?.toMillis?.() ?? null,
+      simStepMs: raceState.simStepMs ?? 50,
+      outputFrameMs: raceState.outputFrameMs ?? raceState.tickIntervalMs ?? 120,
+      tickIntervalMs: raceState.tickIntervalMs ?? raceState.outputFrameMs ?? 120,
+      trackLengthM: raceState.trackLengthM ?? 0,
+      snapshotHash: raceState.inputsSnapshotHash ?? '',
+      slowmoTriggerMs: raceState.slowmoTriggerMs ?? null,
+      rankings: params.setData?.raceResult?.rankings ?? [],
+      keyframeChunkSize,
+      keyframeChunkCount,
+      keyframeCount,
+      eventBucketMs,
+      eventChunkCount,
+      eventCount: raceState.eventCount ?? 0,
+      keyframeChunks,
+      eventBuckets: eventBucketData,
+      nextCursor,
     }
   }
 
@@ -539,6 +718,78 @@ export function createRaceReadCallables(deps: RaceReadDeps) {
     },
   )
 
+  const getRaceTimeline = onCall(
+    CALLABLE_OPTIONS,
+    async (request) => {
+      const startedAtMs = Date.now()
+      try {
+        const authUid = requireAuthUid(request)
+        const { roomId, playerId, sessionToken, joinToken, setIndex, chunkCursor } = parseOrThrow(
+          getRaceTimelineSchema,
+          request.data,
+        )
+        if (playerId !== authUid) {
+          throw new HttpsError('permission-denied', 'Player identity mismatch')
+        }
+        await deps.assertJoinedRoomPlayerRequest({ roomId, playerId, sessionToken, joinToken, authUid })
+
+        const room = await deps.getRoom(roomId)
+        if (room.currentSet !== setIndex) {
+          deps.throwInvalidSetIndex({
+            roomId,
+            playerId,
+            action: 'getRaceTimeline',
+            requestedSetIndex: setIndex,
+            currentSetIndex: room.currentSet,
+          })
+        }
+
+        const setDocRef = deps.db.collection('rooms').doc(roomId).collection('sets').doc(`set-${setIndex}`)
+        const setDoc = await setDocRef.get()
+        if (!setDoc.exists) {
+          const result = { success: true, hasTimeline: false }
+          if (deps.logger.info && shouldSampleRead('getRaceTimeline')) {
+            deps.logger.info('perf.getRaceTimeline', {
+              roomId,
+              playerId,
+              setIndex,
+              durationMs: Date.now() - startedAtMs,
+              hasTimeline: false,
+              payloadSource: 'missing-set-doc',
+            })
+          }
+          return result
+        }
+
+        const setData = setDoc.data() as GetRaceStateSetDocData | undefined
+        const result = await buildChunkedRaceTimelineResponse({
+          setIndex,
+          setDocRef,
+          setData,
+          chunkCursor,
+        })
+
+        if (deps.logger.info && shouldSampleRead('getRaceTimeline')) {
+          deps.logger.info('perf.getRaceTimeline', {
+            roomId,
+            playerId,
+            setIndex,
+            durationMs: Date.now() - startedAtMs,
+            hasTimeline: result.hasTimeline,
+            payloadSource: result.hasTimeline ? 'chunked-v2' : 'unavailable',
+            keyframeChunkCount: result.hasTimeline ? result.keyframeChunks.length : 0,
+            eventBucketCount: result.hasTimeline ? result.eventBuckets.length : 0,
+            hasNextPage: result.hasTimeline ? result.nextCursor !== null : false,
+          })
+        }
+        return result
+      } catch (error) {
+        deps.logger.error('getRaceTimeline error', error)
+        rethrowUnexpected(error, 'Failed to get race timeline')
+      }
+    },
+  )
+
   const getSetResult = onCall(
     CALLABLE_OPTIONS,
     async (request) => {
@@ -718,5 +969,5 @@ export function createRaceReadCallables(deps: RaceReadDeps) {
     },
   )
 
-  return { getRaceState, getSetResult }
+  return { getRaceState, getRaceTimeline, getSetResult }
 }

@@ -27,7 +27,6 @@ import { createRaceReadCallables } from './domains/race-read'
 import { createRaceWriteCallables } from './domains/race-write'
 import { createSelectionCallables } from './domains/selection'
 import { createRoomLifecycleCallables } from './domains/room-lifecycle'
-import { createFinalResultCallables } from './domains/final-result'
 
 initializeApp()
 
@@ -233,7 +232,6 @@ function removeLuckBonusFromHorseStats(
 const {
   assertJoinedRoomPlayerRequest,
   assertJoinedRoomHostRequest,
-  assertHostWaitingRoomActionRequest,
   assertAugmentSelectionRequestContext,
 } = createRequestGuards({
   verifyGuestSession,
@@ -284,7 +282,6 @@ const roomLifecycleCallables = createRoomLifecycleCallables({
   verifyGuestSession,
   getRoom,
   assertJoinedRoomPlayerRequest,
-  assertHostWaitingRoomActionRequest,
 })
 const selectionCallables = createSelectionCallables({
   db,
@@ -303,14 +300,6 @@ const selectionCallables = createSelectionCallables({
   calculateLuckBonus,
   applyLuckBonusToHorseStats,
 })
-const finalResultCallables = createFinalResultCallables({
-  db,
-  logger,
-  getRoom,
-  updateRoomStatus,
-  assertJoinedRoomHostRequest,
-})
-
 export const createGuestSession = roomLifecycleCallables.createGuestSession
 export const createRoom = roomLifecycleCallables.createRoom
 export const joinRoom = roomLifecycleCallables.joinRoom
@@ -319,7 +308,6 @@ export const setPlayerReady = roomLifecycleCallables.setPlayerReady
 export const leaveRoom = roomLifecycleCallables.leaveRoom
 export const leaveRoomOnUnload = roomLifecycleCallables.leaveRoomOnUnload
 export const cleanupPendingLeaves = roomLifecycleCallables.cleanupPendingLeaves
-export const updateRoomSettings = roomLifecycleCallables.updateRoomSettings
 export const startGame = roomLifecycleCallables.startGame
 
 export const selectHorse = selectionCallables.selectHorse
@@ -333,8 +321,5 @@ export const startRace = raceWriteCallables.startRace
 export const readyNextSet = raceWriteCallables.readyNextSet
 
 export const getRaceState = raceReadCallables.getRaceState
+export const getRaceTimeline = raceReadCallables.getRaceTimeline
 export const getSetResult = raceReadCallables.getSetResult
-
-export const skipSet = raceWriteCallables.skipSet
-
-export const submitFinalRaceResult = finalResultCallables.submitFinalRaceResult

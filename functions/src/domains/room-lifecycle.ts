@@ -42,19 +42,6 @@ type RoomLifecycleDeps = {
     joinToken: string
     authUid?: string
   }) => Promise<void>
-  assertHostWaitingRoomActionRequest: (params: {
-    roomId: string
-    playerId: string
-    sessionToken: string
-    joinToken: string
-    authUid?: string
-    hostErrorMessage: string
-    waitingStatusMessage: string
-  }) => Promise<{
-    status: RoomStatus
-    currentSet: number
-    roundCount: number
-  }>
   leaveGracePeriodMs?: number
   pendingLeaveCleanupBatchSize?: number
 }
@@ -97,15 +84,6 @@ const leaveRoomSchema = z.object({
   playerId: z.string().min(1, 'playerId is required'),
   sessionToken: z.string().min(1, 'sessionToken is required'),
   joinToken: z.string().min(1, 'joinToken is required'),
-})
-
-const updateRoomSettingsSchema = z.object({
-  roomId: z.string().min(1, 'roomId is required'),
-  playerId: z.string().min(1, 'playerId is required'),
-  sessionToken: z.string().min(1, 'sessionToken is required'),
-  joinToken: z.string().min(1, 'joinToken is required'),
-  roundCount: z.number().int().min(1).max(3).optional(),
-  rerollLimit: z.number().int().min(0).max(5).optional(),
 })
 
 const startGameSchema = z.object({
@@ -862,42 +840,6 @@ export function createRoomLifecycleCallables(deps: RoomLifecycleDeps) {
     },
   )
 
-  const updateRoomSettings = onCall(
-    CALLABLE_OPTIONS,
-    async (request) => {
-      try {
-        const authUid = requireAuthUid(request)
-        const parsed = parseOrThrow(updateRoomSettingsSchema, request.data)
-        const { roomId, playerId, sessionToken, joinToken, roundCount, rerollLimit } = parsed
-        if (playerId !== authUid) {
-          throw new HttpsError('permission-denied', 'Player identity mismatch')
-        }
-        await deps.assertHostWaitingRoomActionRequest({
-          roomId,
-          playerId,
-          sessionToken,
-          joinToken,
-          authUid,
-          hostErrorMessage: 'Only host can update room settings',
-          waitingStatusMessage: 'Room settings can only be changed before game starts',
-        })
-
-        const updateData: { roundCount?: number; rerollLimit?: number; updatedAt: Timestamp } = {
-          updatedAt: Timestamp.now(),
-        }
-        if (roundCount !== undefined) updateData.roundCount = roundCount
-        if (rerollLimit !== undefined) updateData.rerollLimit = rerollLimit
-
-        await deps.db.collection('rooms').doc(roomId).update(updateData)
-        deps.logger.info('Room settings updated', { roomId, roundCount, rerollLimit })
-        return { success: true }
-      } catch (error) {
-        deps.logger.error('updateRoomSettings error', error)
-        rethrowUnexpected(error, 'Failed to update room settings')
-      }
-    },
-  )
-
   const startGame = onCall(
     CALLABLE_OPTIONS,
     async (request) => {
@@ -997,7 +939,6 @@ export function createRoomLifecycleCallables(deps: RoomLifecycleDeps) {
     leaveRoom,
     leaveRoomOnUnload,
     cleanupPendingLeaves,
-    updateRoomSettings,
     startGame,
   }
 }
