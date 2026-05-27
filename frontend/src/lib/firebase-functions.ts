@@ -202,7 +202,7 @@ export const selectAugment = createCallable<
     setIndex: number
     augmentId: string
   },
-  { success: boolean }
+  { success: boolean; allPlayersSelected: boolean; nextStatus: string }
 >('selectAugment')
 
 export const getAugmentSelection = createCallable<

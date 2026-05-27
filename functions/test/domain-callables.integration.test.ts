@@ -525,7 +525,11 @@ test('selectAugment: final selection applies stats and moves room to racing', as
     },
   })
 
-  assert.deepEqual(result, { success: true })
+  assert.deepEqual(result, {
+    success: true,
+    allPlayersSelected: true,
+    nextStatus: 'racing',
+  })
   const room = store.read('rooms/room-select')
   assert.equal(room?.status, 'racing')
 

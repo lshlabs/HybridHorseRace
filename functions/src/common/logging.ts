@@ -1,4 +1,4 @@
-import { logger } from 'firebase-functions'
+import * as logger from 'firebase-functions/logger'
 
 export type LogContext = Record<string, unknown>
 

@@ -1,4 +1,5 @@
 import Phaser from 'phaser'
+import type { RaceGameData } from './race/controllers/RaceDataSync'
 
 const BOOT_SCENE_KEY = 'Boot'
 const NEXT_SCENE_KEY = 'RaceScene'
@@ -18,8 +19,11 @@ function canLoadDocumentFonts(): boolean {
  * UI에서 공통으로 쓰는 폰트를 먼저 로드한 뒤 RaceScene으로 넘어간다.
  */
 export default class BootScene extends Phaser.Scene {
-  constructor() {
+  private readonly initialRaceData?: RaceGameData
+
+  constructor(initialRaceData?: RaceGameData) {
     super(BOOT_SCENE_KEY)
+    this.initialRaceData = initialRaceData
   }
 
   async create() {
@@ -27,6 +31,6 @@ export default class BootScene extends Phaser.Scene {
       await Promise.all(buildFontFaceLoadRequests())
     }
 
-    this.scene.start(NEXT_SCENE_KEY)
+    this.scene.start(NEXT_SCENE_KEY, this.initialRaceData)
   }
 }

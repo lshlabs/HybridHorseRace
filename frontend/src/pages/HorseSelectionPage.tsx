@@ -76,6 +76,11 @@ interface HorseConfirmParams {
   roomJoinToken: string
 }
 
+type HorseSelectionSubmitResult = {
+  horseData: SavedHorseData
+  nextStatus?: string
+}
+
 const HORSE_STATS: Array<{
   key: StatName
   shortLabelKey: string
@@ -209,7 +214,10 @@ export function HorseSelectionPage() {
   const [roomJoinToken, setRoomJoinToken] = useState<string | null>(
     roomId ? getRoomJoinToken(roomId) : null,
   )
-  const { room, players, loading } = useRoom(roomId)
+  const { room, players, loading } = useRoom(roomId, {
+    enabled: !!playerId && !!sessionToken,
+    subscribePlayers: !!roomJoinToken,
+  })
 
   useEffect(() => {
     void getGuestSession().then((session) => {
@@ -379,22 +387,22 @@ export function HorseSelectionPage() {
   const trySubmitHorseSelectionRealtime = async (
     candidate: HorseCandidate,
     params: HorseConfirmParams,
-  ): Promise<boolean> => {
+  ): Promise<{ success: boolean; nextStatus?: string }> => {
     try {
-      await selectHorseCallable({
+      const response = await selectHorseCallable({
         roomId: params.roomId,
         playerId: params.playerId,
         sessionToken: params.sessionToken,
         joinToken: params.roomJoinToken,
         horseStats: candidate.stats,
       })
-      return true
+      return { success: true, nextStatus: response.data.nextStatus }
     } catch (callableErr) {
       console.warn(
         '[HorseSelectionPage] selectHorse callable failed, fallback to local:',
         callableErr,
       )
-      return false
+      return { success: false }
     }
   }
 
@@ -458,18 +466,18 @@ export function HorseSelectionPage() {
   const submitHorseSelection = async (
     selectedHorseCandidate: HorseCandidate,
     confirmParams: HorseConfirmParams,
-  ): Promise<SavedHorseData> => {
+  ): Promise<HorseSelectionSubmitResult> => {
     const horseData = buildSavedHorseData(selectedHorseCandidate)
-    const callableSuccess = await trySubmitHorseSelectionRealtime(
+    const submitResult = await trySubmitHorseSelectionRealtime(
       selectedHorseCandidate,
       confirmParams,
     )
 
-    if (!callableSuccess) {
+    if (!submitResult.success) {
       saveHorseSelectionToLocalFallback(horseData, confirmParams.playerId)
     }
 
-    return horseData
+    return { horseData, nextStatus: submitResult.nextStatus }
   }
 
   // 확인 버튼 처리
@@ -497,9 +505,14 @@ export function HorseSelectionPage() {
     setIsSubmitting(true)
 
     try {
-      const horseData = await submitHorseSelection(selectedHorseCandidate, confirmParams)
+      const { horseData, nextStatus } = await submitHorseSelection(
+        selectedHorseCandidate,
+        confirmParams,
+      )
       setSelectedHorse(horseData)
-      // 성공 후 이동은 여기서 바로 하지 않고 room.status 구독으로 전원 동기화한다.
+      if (nextStatus && nextStatus !== 'horseSelection') {
+        handleRoomStatusRedirect(nextStatus)
+      }
     } catch (err) {
       console.error('Failed to select horse:', err)
       const errorMessage = err instanceof Error ? err.message : t('horseSelection.selectFailed')

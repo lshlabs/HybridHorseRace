@@ -86,7 +86,6 @@ export function LobbyPage() {
   const [searchParams] = useSearchParams()
 
   const roomId = searchParams.get('roomId')
-  const { room, players, loading, error: roomError } = useRoom(roomId)
 
   const [playerId, setPlayerId] = useState<string>('')
   const [sessionToken, setSessionToken] = useState<string>('')
@@ -106,6 +105,13 @@ export function LobbyPage() {
   const [isComposing, setIsComposing] = useState(false)
   const [lobbyConnectionState, setLobbyConnectionState] =
     useState<LobbyConnectionState>('bootstrapping')
+  const [optimisticJoinedPlayerId, setOptimisticJoinedPlayerId] = useState<string | null>(null)
+  const canSubscribeRoom = !!playerId && !!sessionToken
+  const canSubscribePlayers = !!roomJoinToken || optimisticJoinedPlayerId === playerId
+  const { room, players, loading, error: roomError } = useRoom(roomId, {
+    enabled: canSubscribeRoom,
+    subscribePlayers: canSubscribePlayers,
+  })
 
   const hasLeaveSentRef = useRef(false)
   const roomIdRef = useRef<string | null>(null)
@@ -155,6 +161,7 @@ export function LobbyPage() {
 
   useEffect(() => {
     setJoinAttemptCount(0)
+    setOptimisticJoinedPlayerId(null)
   }, [roomId, playerId])
 
   useEffect(() => {
@@ -372,6 +379,7 @@ export function LobbyPage() {
 
       setRoomJoinToken(roomId, response.data.joinToken, response.data.joinTokenExpiresAtMillis)
       setRoomJoinTokenState(response.data.joinToken)
+      setOptimisticJoinedPlayerId(activePlayerId)
       setJoinAttemptCount(0)
       return null
     })
@@ -431,7 +439,8 @@ export function LobbyPage() {
       return
     }
 
-    const hasCurrentPlayerInRoom = players.some((player) => player.id === playerId)
+    const hasCurrentPlayerInRoom =
+      players.some((player) => player.id === playerId) || optimisticJoinedPlayerId === playerId
     if (hasCurrentPlayerInRoom) {
       setLobbyConnectionState('joined')
       return
@@ -455,6 +464,7 @@ export function LobbyPage() {
     players,
     isJoiningRoom,
     joinAttemptCount,
+    optimisticJoinedPlayerId,
   ])
 
   const shouldRefreshJoinToken = (error: unknown): boolean => {

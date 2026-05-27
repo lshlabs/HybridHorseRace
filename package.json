@@ -14,7 +14,7 @@
     "predeploy:verify": "node scripts/predeploy-verify.mjs",
     "predeploy:verify:staging": "node scripts/predeploy-verify.mjs --project staging --mode staging",
     "predeploy:verify:prod": "node scripts/predeploy-verify.mjs --project prod --mode production",
-    "contract:check": "sh -c 'if lsof -i :5001 -sTCP:LISTEN -t >/dev/null 2>&1 && lsof -i :8081 -sTCP:LISTEN -t >/dev/null 2>&1; then node frontend/scripts/mpc07-contract-check.mjs; else npm run functions:build && firebase emulators:exec --only functions,firestore \"node frontend/scripts/mpc07-contract-check.mjs\"; fi'",
+    "contract:check": "npm run functions:build && firebase emulators:exec --only functions,firestore,auth \"node frontend/scripts/mpc07-contract-check.mjs\"",
     "deploy": "npm run build --prefix frontend && firebase deploy",
     "deploy:hosting": "npm run build --prefix frontend && firebase deploy --only hosting",
     "deploy:functions": "firebase deploy --only functions",

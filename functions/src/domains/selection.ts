@@ -384,7 +384,11 @@ export function createSelectionCallables(deps: SelectionDeps) {
           augmentId,
           allSelected: transactionResult.allSelected,
         })
-        return { success: true }
+        return {
+          success: true,
+          allPlayersSelected: transactionResult.allSelected,
+          nextStatus: transactionResult.allSelected ? STATUS_RACING : STATUS_AUGMENT_SELECTION,
+        }
       } catch (error) {
         deps.logger.error('selectAugment error', error)
         rethrowUnexpected(error, 'Failed to select augment')

@@ -1,5 +1,5 @@
 import { HttpsError } from 'firebase-functions/v2/https'
-import { logger } from 'firebase-functions'
+import * as logger from 'firebase-functions/logger'
 import { initializeApp } from 'firebase-admin/app'
 import { getFirestore, Timestamp } from 'firebase-admin/firestore'
 import {

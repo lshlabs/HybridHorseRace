@@ -408,18 +408,7 @@ export default class RaceScene extends Phaser.Scene {
   /**
    * Scene 초기화 시 데이터 받기
    */
-  init(data?: {
-    roomId?: string
-    playerId?: string
-    room?: Room
-    players?: Player[]
-    selectedHorse?: {
-      name: string
-      stats: Stats
-      totalStats: number
-      selectedAt: string
-    }
-  }) {
+  init(data?: RaceGameData) {
     this.dataSync.applyInitData(data)
   }
 
@@ -1595,8 +1584,15 @@ export default class RaceScene extends Phaser.Scene {
         setIndex: this.currentSet,
         augmentId: augment.id,
       })
-        .then(() => {
+        .then((response) => {
           this.startWaitingForOtherAugmentSelections()
+          if (
+            this.isWaitingForOtherAugmentSelections &&
+            response.data.allPlayersSelected &&
+            response.data.nextStatus === ROOM_STATUS_RACING
+          ) {
+            this.resumeRaceAfterAugmentSelectionWait()
+          }
         })
         .catch((error) => {
           console.error('[RaceScene] selectAugment failed:', error)

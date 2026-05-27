@@ -56,6 +56,11 @@ interface UseRoomResult {
   error: FirestoreError | null
 }
 
+interface UseRoomOptions {
+  enabled?: boolean
+  subscribePlayers?: boolean
+}
+
 function toDateIfFirestoreTimestamp(value: unknown): unknown {
   if (!value || typeof value !== 'object') return value
   const maybeTimestamp = value as { toDate?: () => Date }
@@ -79,18 +84,20 @@ function mapPlayerData(playerId: string, data: Record<string, unknown>): Player 
   } as Player
 }
 
-export function useRoom(roomId: string | null): UseRoomResult {
+export function useRoom(roomId: string | null, options: UseRoomOptions = {}): UseRoomResult {
+  const enabled = options.enabled ?? true
+  const subscribePlayers = options.subscribePlayers ?? true
   const [room, setRoom] = useState<Room | null>(null)
   const [players, setPlayers] = useState<Player[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<FirestoreError | null>(null)
 
   useEffect(() => {
-    if (!roomId) {
+    if (!roomId || !enabled) {
       /* eslint-disable react-hooks/set-state-in-effect */
       setRoom(null)
       setPlayers([])
-      setLoading(false)
+      setLoading(!!roomId && !enabled)
       setError(null)
       /* eslint-enable react-hooks/set-state-in-effect */
       return
@@ -140,13 +147,16 @@ export function useRoom(roomId: string | null): UseRoomResult {
     }
 
     const unsubscribeRoom = subscribeRoomDocument()
-    const unsubscribePlayers = subscribePlayersCollection()
+    const unsubscribePlayers = subscribePlayers ? subscribePlayersCollection() : undefined
+    if (!subscribePlayers) {
+      setPlayers([])
+    }
 
     return () => {
       unsubscribeRoom()
-      unsubscribePlayers()
+      unsubscribePlayers?.()
     }
-  }, [roomId])
+  }, [enabled, roomId, subscribePlayers])
 
   return { room, players, loading, error }
 }

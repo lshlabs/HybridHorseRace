@@ -7,6 +7,7 @@ import RaceScene from './scenes/race/RaceScene'
 import AugmentSelectionScene from './scenes/augment/AugmentSelectionScene'
 import RaceResultScene from './scenes/result/RaceResultScene'
 import type { Room, Player } from '../../hooks/useRoom'
+import type { RaceGameData } from './scenes/race/controllers/RaceDataSync'
 
 /** 개발 모드에서 RaceScene으로 전달하는 선택 말 스냅샷 */
 interface SelectedHorseData {
@@ -90,6 +91,15 @@ export function PhaserGame({
   const containerRef = useRef<HTMLDivElement>(null)
   // 반응형 스케일 계산 기준 컨테이너
   const wrapperRef = useRef<HTMLDivElement>(null)
+  const initialRaceDataRef = useRef<RaceGameData>({
+    roomId,
+    playerId,
+    sessionToken,
+    roomJoinToken,
+    room,
+    players,
+    selectedHorse,
+  })
   const [scale, setScale] = useState(1)
   // 모바일 세로 모드 안내 오버레이 표시 여부
   const [isPortrait, setIsPortrait] = useState(false)
@@ -105,7 +115,12 @@ export function PhaserGame({
       height: aspectRatioHeight, // Phaser 초기 높이 (고정 크기)
       parent: containerRef.current, // 게임이 렌더링될 부모 요소
       backgroundColor: '#000000', // 배경색 (test-phaser.html과 동일)
-      scene: [BootScene, RaceScene, AugmentSelectionScene, RaceResultScene],
+      scene: [
+        new BootScene(initialRaceDataRef.current),
+        RaceScene,
+        AugmentSelectionScene,
+        RaceResultScene,
+      ],
       render: {
         pixelArt: true,
         antialias: false, // 픽셀 폰트 선명도 (true면 확대 시 흐림)

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { PhaserGame } from '../components/game/PhaserGame'
+import { Spinner } from '../components/ui/Spinner'
 import { useRoom, type Room, type Player } from '../hooks/useRoom'
 import type { Stats } from '../engine/race/types'
 import { formatNickname, type NicknameData } from '../utils/nickname-generator'
@@ -66,11 +67,19 @@ export function RacePage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const roomId = searchParams.get('roomId')
-  const playerId =
-    searchParams.get('playerId') || localStorage.getItem('dev_player_id') || 'player-0'
+  const queryPlayerId = searchParams.get('playerId')
+  const [sessionPlayerId, setSessionPlayerId] = useState('')
+  const playerId = roomId
+    ? queryPlayerId || sessionPlayerId
+    : queryPlayerId || localStorage.getItem('dev_player_id') || 'player-0'
   const [sessionToken, setSessionToken] = useState('')
   const roomJoinToken = roomId ? getRoomJoinToken(roomId) : null
-  const { room, players, loading } = useRoom(roomId)
+  const canSubscribeRealtimeRoom = !roomId || (!!playerId && !!sessionToken)
+  const canSubscribeRealtimePlayers = !roomId || !!roomJoinToken
+  const { room, players, loading } = useRoom(roomId, {
+    enabled: canSubscribeRealtimeRoom,
+    subscribePlayers: canSubscribeRealtimePlayers,
+  })
   const isDev = import.meta.env.DEV
 
   const navigateWithRoomAndPlayer = (pathname: '/lobby' | '/horse-selection' | '/race-result') => {
@@ -107,12 +116,24 @@ export function RacePage() {
 
   useEffect(() => {
     void getGuestSession().then((session) => {
+      setSessionPlayerId(session.guestId)
       setSessionToken(session.sessionToken)
     })
   }, [])
 
   const roomConfig = loadRoomConfig()
-  const playerCount = players.length || roomConfig.playerCount
+  const isRealtimeRoom = !!roomId
+  const currentRealtimePlayer = isRealtimeRoom
+    ? players.find((player) => player.id === playerId) ?? null
+    : null
+  const isRealtimeGameDataReady =
+    !!room &&
+    !!playerId &&
+    !!sessionToken &&
+    !!roomJoinToken &&
+    players.length > 0 &&
+    !!currentRealtimePlayer
+  const playerCount = isRealtimeRoom ? players.length : players.length || roomConfig.playerCount
   const roundCount = room?.roundCount ?? roomConfig.roundCount
   const rerollLimit = room?.rerollLimit ?? roomConfig.rerollLimit
 
@@ -216,7 +237,7 @@ export function RacePage() {
 
   const selectedHorse = selectedHorseFromPlayers ?? storageSelectedHorse
 
-  const mockRoom: Room = room ?? {
+  const mockRoom: Room = {
     title: `테스트 룸 (${roomId || 'test-room-123'})`,
     maxPlayers: playerCount,
     roundCount,
@@ -296,7 +317,17 @@ export function RacePage() {
     }
   })()
 
-  const finalMockPlayers = players.length > 0 ? players : localizedMockPlayers
+  if (isRealtimeRoom && !isRealtimeGameDataReady) {
+    return (
+      <div className="flex w-full flex-1 items-center justify-center overflow-hidden">
+        <Spinner className="text-primary" size={24} />
+      </div>
+    )
+  }
+
+  const phaserRoom: Room = isRealtimeRoom ? room! : mockRoom
+  const phaserPlayers = isRealtimeRoom ? players : localizedMockPlayers
+  const phaserSelectedHorse = isRealtimeRoom ? selectedHorseFromPlayers : selectedHorse
 
   return (
     <div className="flex w-full flex-1 items-center justify-center overflow-hidden">
@@ -309,9 +340,9 @@ export function RacePage() {
             playerId={playerId}
             sessionToken={sessionToken}
             roomJoinToken={roomJoinToken}
-            room={mockRoom}
-            players={finalMockPlayers}
-            selectedHorse={selectedHorse ?? undefined}
+            room={phaserRoom}
+            players={phaserPlayers}
+            selectedHorse={phaserSelectedHorse ?? undefined}
           />
         </div>
       </div>
